@@ -13,7 +13,9 @@ Shader "Custom/TestShader"
         _Speed2 ("Wave 2 Speed", Float) = 0.3
 
         _SpecularColor ("Specular Color", Color) = (1, 1, 1, 1)
-        _Smoothness ("Smoothness", Range(0.0, 1.0)) = 0.8
+        _Smoothness ("Smoothness", Range(0.0, 1.0)) = 0.9
+
+        _ReflectionStrength ("Reflection Strength", Range(0.0, 2.0)) = 1.0
 
         _FresnelColor ("Fresnel Color", Color) = (0.2, 0.5, 1.0, 1)
         _FresnelPower ("Fresnel Power", Range(1.0, 8.0)) = 4.0
@@ -29,13 +31,24 @@ Shader "Custom/TestShader"
 
         Pass
         {
+            Name "ForwardLit"
+
+            Tags
+            {
+                "LightMode" = "UniversalForward"
+            }
+
             HLSLPROGRAM
 
             #pragma vertex vert
             #pragma fragment frag
 
+            #pragma multi_compile _ _ADDITIONAL_LIGHTS
+            #pragma multi_compile _ _FORWARD_PLUS
+
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/GlobalIllumination.hlsl"
 
             struct Attributes
             {
@@ -45,11 +58,12 @@ Shader "Custom/TestShader"
             struct Varyings
             {
                 float4 positionHCS : SV_POSITION;
-                float3 normalWS : TEXTCOORD0;
-                float3 positionWS : TEXTCOORD1;
+                float3 normalWS : TEXCOORD0;
+                float3 positionWS : TEXCOORD1;
             };
 
             CBUFFER_START(UnityPerMaterial)
+
                 float4 _BaseColor;
 
                 float _Amplitude;
@@ -63,9 +77,13 @@ Shader "Custom/TestShader"
                 float4 _SpecularColor;
                 float _Smoothness;
 
+                float _ReflectionStrength;
+
                 float4 _FresnelColor;
                 float _FresnelPower;
+
             CBUFFER_END
+
 
             Varyings vert(Attributes IN)
             {
@@ -75,59 +93,363 @@ Shader "Custom/TestShader"
 
                 float time = _Time.y;
 
-                // Sinoidal function
-                float wave1 = position.x * _Frequency + time * _Speed;
-                float wave2 = position.z * _Frequency2 + time * _Speed2;
 
-                // Surface deformation
-                position.y += sin(wave1) * _Amplitude;
-                position.y += sin(wave2) * _Amplitude2;
+                // ========================================================
+                // WAVE 1
+                // ========================================================
 
-                // Derivative of the function
-                // dy/dx = Amplitude * Frequency * cos(wave)
-                float slopeX = _Amplitude * _Frequency * cos(wave1);
-                float slopeZ = _Amplitude2 * _Frequency2 * cos(wave2);
+                float wave1 =
+                    position.x * _Frequency
+                    + time * _Speed;
 
-                // Deformed surface normal
-                float3 normalOS = normalize(float3(-slopeX, 1.0, -slopeZ));
 
-                //position.y += sin(position.x) * _Amplitude;
+                // ========================================================
+                // WAVE 2
+                // ========================================================
 
-                // Transformations
-                OUT.positionHCS = TransformObjectToHClip(position);
+                float wave2 =
+                    position.z * _Frequency2
+                    + time * _Speed2;
 
-                OUT.normalWS = TransformObjectToWorldNormal(normalOS);
-                OUT.positionWS = TransformObjectToWorld(position);
+
+                // ========================================================
+                // SURFACE DEFORMATION
+                // ========================================================
+
+                position.y +=
+                    sin(wave1) * _Amplitude;
+
+                position.y +=
+                    sin(wave2) * _Amplitude2;
+
+
+                // ========================================================
+                // DERIVATIVES
+                // ========================================================
+
+                float slopeX =
+                    _Amplitude
+                    * _Frequency
+                    * cos(wave1);
+
+                float slopeZ =
+                    _Amplitude2
+                    * _Frequency2
+                    * cos(wave2);
+
+
+                // ========================================================
+                // DEFORMED SURFACE NORMAL
+                // ========================================================
+
+                float3 normalOS =
+                    normalize(
+                        float3(
+                            -slopeX,
+                            1.0,
+                            -slopeZ
+                        )
+                    );
+
+
+                // ========================================================
+                // TRANSFORMATIONS
+                // ========================================================
+
+                OUT.positionHCS =
+                    TransformObjectToHClip(position);
+
+                OUT.normalWS =
+                    TransformObjectToWorldNormal(normalOS);
+
+                OUT.positionWS =
+                    TransformObjectToWorld(position);
 
                 return OUT;
             }
 
+
+            // ============================================================
+            // DIRECT LIGHTING
+            // ============================================================
+
+            float3 CalculateLight(
+                float3 normalWS,
+                float3 viewDirWS,
+                Light light
+            )
+            {
+                float3 lightDirWS =
+                    normalize(light.direction);
+
+
+                // --------------------------------------------------------
+                // Diffuse
+                // --------------------------------------------------------
+
+                float diffuse =
+                    saturate(
+                        dot(
+                            normalWS,
+                            lightDirWS
+                        )
+                    );
+
+
+                // --------------------------------------------------------
+                // Specular
+                // --------------------------------------------------------
+
+                float3 halfDir =
+                    normalize(
+                        lightDirWS
+                        + viewDirWS
+                    );
+
+                float specular =
+                    pow(
+                        saturate(
+                            dot(
+                                normalWS,
+                                halfDir
+                            )
+                        ),
+                        _Smoothness * 128.0
+                    );
+
+
+                // --------------------------------------------------------
+                // Attenuation
+                // --------------------------------------------------------
+
+                float attenuation =
+                    light.distanceAttenuation
+                    * light.shadowAttenuation;
+
+
+                // --------------------------------------------------------
+                // Lighting
+                // --------------------------------------------------------
+
+                float3 diffuseLighting =
+                    diffuse
+                    * light.color
+                    * attenuation;
+
+                float3 specularLighting =
+                    specular
+                    * _SpecularColor.rgb
+                    * light.color
+                    * attenuation;
+
+
+                return diffuseLighting
+                    + specularLighting;
+            }
+
+
             half4 frag(Varyings IN) : SV_Target
             {
-                float3 normalWS = normalize(IN.normalWS);
-                float3 viewDirWS = normalize(_WorldSpaceCameraPos.xyz - IN.positionWS);
+                // ========================================================
+                // SURFACE DATA
+                // ========================================================
 
-                Light mainLight = GetMainLight();
+                float3 normalWS =
+                    normalize(IN.normalWS);
 
-                float3 lightDirWS = normalize(mainLight.direction);
+                float3 viewDirWS =
+                    normalize(
+                        _WorldSpaceCameraPos.xyz
+                        - IN.positionWS
+                    );
 
-                float diffuse = saturate(dot(normalWS, mainLight.direction));
 
-                float3 halfDir = normalize(lightDirWS + viewDirWS);
+                // ========================================================
+                // INPUT DATA
+                // ========================================================
 
-                float specular = pow(saturate(dot(normalWS, halfDir)), _Smoothness * 128.0);
+                InputData inputData =
+                    (InputData)0;
 
-                float fresnel = pow(1.0 - saturate(dot(normalWS, viewDirWS)), _FresnelPower);
+                inputData.positionWS =
+                    IN.positionWS;
 
-                float3 fresnelLighting = fresnel * _FresnelColor.rgb;
+                inputData.normalWS =
+                    normalWS;
 
-                float3 lighting = diffuse * mainLight.color;
+                inputData.viewDirectionWS =
+                    viewDirWS;
 
-                float3 specularLighting = specular * _SpecularColor.rgb * mainLight.color;
+                inputData.normalizedScreenSpaceUV =
+                    GetNormalizedScreenSpaceUV(
+                        IN.positionHCS
+                    );
 
-                float3 finalColor = _BaseColor.rgb * lighting + specularLighting + fresnelLighting;
 
-                return half4(finalColor, _BaseColor.a);
+                // ========================================================
+                // MAIN LIGHT — MOON
+                // ========================================================
+
+                Light mainLight =
+                    GetMainLight();
+
+                float3 lighting =
+                    CalculateLight(
+                        normalWS,
+                        viewDirWS,
+                        mainLight
+                    );
+
+
+                // ========================================================
+                // ADDITIONAL LIGHTS — LANTERNS
+                // ========================================================
+
+                #if defined(_ADDITIONAL_LIGHTS)
+
+                    // ----------------------------------------------------
+                    // Forward+
+                    // ----------------------------------------------------
+
+                    #if USE_FORWARD_PLUS
+
+                        UNITY_LOOP
+
+                        for (
+                            uint lightIndex = 0;
+                            lightIndex < min(
+                                URP_FP_DIRECTIONAL_LIGHTS_COUNT,
+                                MAX_VISIBLE_LIGHTS
+                            );
+                            lightIndex++
+                        )
+                        {
+                            Light additionalLight =
+                                GetAdditionalLight(
+                                    lightIndex,
+                                    inputData.positionWS,
+                                    half4(1, 1, 1, 1)
+                                );
+
+                            lighting +=
+                                CalculateLight(
+                                    normalWS,
+                                    viewDirWS,
+                                    additionalLight
+                                );
+                        }
+
+                    #endif
+
+
+                    // ----------------------------------------------------
+                    // Forward
+                    // ----------------------------------------------------
+
+                    uint pixelLightCount =
+                        GetAdditionalLightsCount();
+
+                    LIGHT_LOOP_BEGIN(pixelLightCount)
+
+                        Light additionalLight =
+                            GetAdditionalLight(
+                                lightIndex,
+                                inputData.positionWS,
+                                half4(1, 1, 1, 1)
+                            );
+
+                        lighting +=
+                            CalculateLight(
+                                normalWS,
+                                viewDirWS,
+                                additionalLight
+                            );
+
+                    LIGHT_LOOP_END
+
+                #endif
+
+
+                // ========================================================
+                // FRESNEL
+                // ========================================================
+
+                float fresnel =
+                    pow(
+                        1.0
+                        - saturate(
+                            dot(
+                                normalWS,
+                                viewDirWS
+                            )
+                        ),
+                        _FresnelPower
+                    );
+
+
+                // ========================================================
+                // ENVIRONMENT REFLECTION
+                // ========================================================
+
+                float3 reflectionVector =
+                    reflect(
+                        -viewDirWS,
+                        normalWS
+                    );
+
+
+                // Smoothness -> Perceptual Roughness
+                //
+                // Smoothness 1.0 = sharp reflection
+                // Smoothness 0.0 = very blurry reflection
+
+                float perceptualRoughness =
+                    1.0 - _Smoothness;
+
+
+                float3 environmentReflection =
+                    GlossyEnvironmentReflection(
+                        reflectionVector,
+                        IN.positionWS,
+                        perceptualRoughness,
+                        1.0,
+                        inputData.normalizedScreenSpaceUV
+                    );
+
+
+                // Fresnel makes the reflection stronger
+                // at grazing angles.
+
+                float3 reflectionLighting =
+                    environmentReflection
+                    * _ReflectionStrength
+                    * fresnel;
+
+
+                // ========================================================
+                // FRESNEL COLOR
+                // ========================================================
+
+                float3 fresnelLighting =
+                    fresnel
+                    * _FresnelColor.rgb;
+
+
+                // ========================================================
+                // FINAL COLOR
+                // ========================================================
+
+                float3 finalColor =
+                    _BaseColor.rgb
+                    * lighting
+                    + reflectionLighting
+                    + fresnelLighting;
+
+
+                return half4(
+                    finalColor,
+                    _BaseColor.a
+                );
             }
 
             ENDHLSL
